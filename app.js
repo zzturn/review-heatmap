@@ -1,8 +1,12 @@
-const {Client} = require("@notionhq/client")
+const { Client } = require("@notionhq/client")
 const express = require('express');
 const morgan = require('morgan');
 const cors = require('cors');
+const https = require('https');
+
 const dotenv = require('dotenv');
+const HttpsProxyAgent = require('https-proxy-agent');
+
 
 /**
  * 本项目主要为了配合获取 notion page 中二级标题以 yyyy-mm-dd 开头为格式的出现次数，用于热力图的生成
@@ -15,12 +19,21 @@ const dotenv = require('dotenv');
 
 // Load environment variables from .env file
 dotenv.config();
+const hostname = process.env.SERVER_HOST;
+const port = process.env.SERVER_PORT;
+const notion_token = process.env.NOTION_TOKEN;
+const review_page_id = process.env.PAGE_ID;
+const proxy = process.env.PROXY;
+
+const agent = new HttpsProxyAgent(proxy);
+const headers = { "Authorization": "Bearer " + notion_token, "Notion-Version": "2022-02-22" }
 
 
+
+
+// server
 const app = express();
 app.use(cors());
-
-
 // Define a custom log format
 const logFormat = ':date[iso] :remote-addr :method :url :status :response-time ms';
 // Use the custom log format with morgan middleware
@@ -28,16 +41,13 @@ app.use(morgan(logFormat));
 
 
 
-const hostname = process.env.SERVER_HOST;
-const port = process.env.SERVER_PORT;
-const notion_token = process.env.NOTION_TOKEN;
-const review_page_id = process.env.PAGE_ID;
-
 
 // 缓存所有的block结果
 let blocksCache = undefined;
 // 缓存最近更新时间
 let lastEditTimeMapCache = new Map();
+
+
 
 // Define a route to handle requests
 app.get('/get', async (req, res) => {
@@ -49,6 +59,19 @@ app.get('/get', async (req, res) => {
         res.status(500).send(JSON.stringify(error))
     }
 });
+
+
+// 获取缓存内容
+app.get('/cache', async (req, res) => {
+    try {
+        map = getHeading2(blocksCache);
+        res.status(200).header('Content-Type', 'application/json').send( Array.from(map));
+    } catch (error) {
+        console.log(error)
+        res.status(500).send(JSON.stringify(error))
+    }
+});
+
 
 // 刷新缓存
 app.get('/refresh', async (req, res) => {
@@ -72,6 +95,54 @@ app.listen(port, hostname, () => {
 const notion = new Client({
     auth: notion_token,
 })
+
+
+
+/**
+ * 
+ * @param {string} block_id 
+ * @returns block_id 的一级 children 信息
+ */
+async function fetchData(block_id, page_size=100, next_cursor) {
+    console.log("parent block id: ", block_id)
+    console.log("page_size: ", page_size)
+    console.log("next_cursor: ", next_cursor)
+    return new Promise((resolve, reject) => {
+        let responseData = '';
+
+        const options = {
+            method: 'GET',
+            headers: headers,
+            agent: agent,
+            hostname: 'api.notion.com',
+            path: `/v1/blocks/${block_id}/children?page_size=${page_size}${next_cursor ? `&start_cursor=${next_cursor}` : ''}`
+        };
+
+        const req = https.request(options, (res) => {
+            res.on('data', (chunk) => {
+                responseData += chunk;
+            });
+
+            res.on('end', () => {
+                // console.log(responseData)
+
+                try {
+                    resolve(JSON.parse(responseData));
+                } catch (error) {
+                    console.error(error)
+                    reject(error);
+                }
+            });
+        });
+
+        req.on('error', (error) => {
+            console.error(error)
+            reject(error);
+        });
+
+        req.end();
+    });
+}
 
 const getHeading2FromBlock = async (parentBlockId) => {
     let map;
@@ -106,8 +177,9 @@ const getNewBlocks = async (block_id) => {
 
     while (has_more === true) {
         // 获取子节点
-        console.log("begin", new Date())
-        let res = await notion.blocks.children.list({block_id: block_id, page_size: page_size, start_cursor: cursor})
+        console.log("获取"+block_id+"的一级children信息")
+        let res = await fetchData(block_id, page_size, cursor);
+        console.log("获取"+block_id+"信息完成")
         // 过滤出新 block
         let new_blocks = res.results.filter(x => lastEditTimeMapCache.get(x.id) == undefined || new Date(x.last_edited_time) > lastEditTimeMapCache.get(x.id));
         let new_blocks_with_children = await Promise.all(new_blocks.map(async x => {
@@ -117,10 +189,10 @@ const getNewBlocks = async (block_id) => {
             }
             return x;
         }))
-        console.log(new_blocks_with_children)
+        console.log(block_id + " has " + new_blocks_with_children.length)
 
 
-        if (new_blocks_with_children.length > 0) {
+        if (new_blocks_with_children.length > 0 && res.results.has_more) {
             has_more = true
         } else {
             has_more = false
@@ -132,7 +204,7 @@ const getNewBlocks = async (block_id) => {
 }
 
 
-// 获取 block_id 下的所有 children
+// 获取 block_id 下的所有 children，递归查询
 async function getAllChildren(block_id) {
     const page_size = 100
     // 所有的一级 block
@@ -141,7 +213,8 @@ async function getAllChildren(block_id) {
     let cursor = undefined
     while (has_more === true) {
         // 获取子节点
-        let res = await notion.blocks.children.list({block_id: block_id, page_size: page_size, start_cursor: cursor})
+        let res = await fetchData(block_id, page_size, cursor)
+        // console.log(res)
         child_blocks = child_blocks.concat(res.results)
         // 获取子节点的子节点
         for (let block of res.results) {
