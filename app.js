@@ -104,9 +104,9 @@ const notion = new Client({
  * @returns block_id 的一级 children 信息
  */
 async function fetchData(block_id, page_size=100, next_cursor) {
-    console.log(block_id)
-    console.log(page_size)
-    console.log(next_cursor)
+    console.log("parent block id: ", block_id)
+    console.log("page_size: ", page_size)
+    console.log("next_cursor: ", next_cursor)
     return new Promise((resolve, reject) => {
         let responseData = '';
 
@@ -192,7 +192,7 @@ const getNewBlocks = async (block_id) => {
         console.log(block_id + " has " + new_blocks_with_children.length)
 
 
-        if (new_blocks_with_children.length > 0) {
+        if (new_blocks_with_children.length > 0 && res.results.has_more) {
             has_more = true
         } else {
             has_more = false
